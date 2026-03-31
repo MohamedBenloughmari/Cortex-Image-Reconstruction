@@ -5,6 +5,17 @@ import matplotlib.animation as animation
 from scipy.ndimage import gaussian_filter
 
 
+
+'''
+
+
+
+
+
+
+'''
+
+
 class NeuralEncoder:
     def __init__(self, dx: float, dy: float, dt: float, ds: float = None) -> None:
         self.dx = dx
@@ -192,6 +203,49 @@ class NeuralEncoder:
             writer = "pillow" if save_path.endswith(".gif") else "ffmpeg"
             anim.save(save_path, writer=writer, fps=1000 // interval, dpi=120)
         return anim
+    
+
+
+
+'''
+class ConvolutionalNeuralDecoder():
+    def __init__(self):
+    
+
+    def forward(self,x):
+        x=(on_cells, off_cells,image)
+        on_cells.shape=(Tmax,40,40)
+        1 case:
+            we perform convolution on each (i,40,40) image for i in range(Tmax)
+            out of the conv we get Tmax temporal vectors that we could feed to a LSTM
+
+            cons:
+                what loss function to use?
+            discussion
+                is the loss function  
+
+
+
+
+
+
+
+'''
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 if __name__ == "__main__":
     size = 28
     optotype = torch.zeros(size, size)
