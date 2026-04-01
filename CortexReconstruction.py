@@ -4,18 +4,6 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from scipy.ndimage import gaussian_filter
 
-
-
-'''
-
-
-
-
-
-
-'''
-
-
 class NeuralEncoder:
     def __init__(self, dx: float, dy: float, dt: float, ds: float = None) -> None:
         self.dx = dx
@@ -205,47 +193,6 @@ class NeuralEncoder:
         return anim
     
 
-
-
-'''
-class ConvolutionalNeuralDecoder():
-    def __init__(self):
-    
-
-    def forward(self,x):
-        x=(on_cells, off_cells,image)
-        on_cells.shape=(Tmax,40,40)
-        1 case:
-            we perform convolution on each (i,40,40) image for i in range(Tmax)
-            out of the conv we get Tmax temporal vectors that we could feed to a LSTM
-
-            cons:
-                what loss function to use?
-            discussion
-                is the loss function  
-
-
-
-
-
-
-
-'''
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 if __name__ == "__main__":
     size = 28
     optotype = torch.zeros(size, size)
@@ -253,9 +200,9 @@ if __name__ == "__main__":
     optotype[c - t // 2:c + t // 2 + 1, :] = 1.0
     optotype[:, c - t // 2:c + t // 2 + 1] = 1.0
     ds = 0.3
-    sim = NeuralEncoder(dx=0.3, dy=0.3, dt=0.02, ds=ds)
-    sim.fit(optotype, blur_sigma=1.0)
-    sim.simulate_random_walk(sigma=0.1, T=1.0)
+    sim = NeuralEncoder(dx=0.3, dy=0.3, dt=0.1, ds=ds)
+    sim.fit(optotype, blur_sigma=0)
+    sim.simulate_random_walk(sigma=0.02, T=2.0)
     sim.compute_activations(grid_range=10.0, grid_resolution=40, type='GLM')
     np.set_printoptions(threshold=np.inf)
 
