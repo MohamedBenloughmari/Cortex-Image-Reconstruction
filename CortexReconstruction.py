@@ -200,10 +200,10 @@ if __name__ == "__main__":
     optotype[c - t // 2:c + t // 2 + 1, :] = 1.0
     optotype[:, c - t // 2:c + t // 2 + 1] = 1.0
     ds = 0.3
-    sim = NeuralEncoder(dx=0.3, dy=0.3, dt=0.1, ds=ds)
+    sim = NeuralEncoder(dx=0.3, dy=0.3, dt=0.01, ds=ds)
     sim.fit(optotype, blur_sigma=0)
-    sim.simulate_random_walk(sigma=0.02, T=2.0)
-    sim.compute_activations(grid_range=10.0, grid_resolution=40, type='GLM')
+    sim.simulate_random_walk(sigma=0.1, T=2.0)
+    sim.compute_activations(grid_range=10.0, grid_resolution=70, type='GLM')
     np.set_printoptions(threshold=np.inf)
 
     anim = sim.animate(interval=100)
