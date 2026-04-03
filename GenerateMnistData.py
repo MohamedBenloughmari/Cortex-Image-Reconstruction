@@ -34,8 +34,8 @@ class CortexMnistEncoder:
 
     def generate_data(self, train_rate: float, val_rate: float, test_rate: float):
         transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.1307,), (0.3081,))
+            transforms.ToTensor()
+            #transforms.Normalize((0.1307,), (0.3081,))
         ])
         full_train_dataset = datasets.MNIST(
             root='./data', train=True, download=True, transform=transform
@@ -87,7 +87,7 @@ class CortexMnistEncoder:
 
 # --- Usage: encoding ---
 if __name__ == "__main__":
-    encoder = CortexMnistEncoder(Tmax=2, dt=0.1, grid_resolution=40, save_dir="./cortex_mnist")
+    encoder = CortexMnistEncoder(Tmax=2, dt=0.1, grid_resolution=70, save_dir="./cortex_mnist")
     encoder.generate_data(train_rate=0.8, val_rate=0.2, test_rate=1)
     encoder.encode()
 
