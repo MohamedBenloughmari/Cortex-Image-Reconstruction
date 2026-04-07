@@ -1,0 +1,12 @@
+__pycache__/
+
+# Cortex MNIST data
+cortex_mnist/
+
+# MNIST raw data
+data/
+
+# Compiled/binary files
+cortex_mnist.zip
+NeuralDecoder.pth
+NeuralDecoder10.pth

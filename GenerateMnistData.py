@@ -3,7 +3,7 @@ import torch
 from torch.utils.data import Dataset, Subset
 from torchvision import datasets, transforms
 from tqdm import tqdm
-from CortexReconstruction import NeuralEncoder
+from CortexReconstructionMnist import NeuralEncoder
 
 
 class CortexMnistDataset(Dataset):
@@ -11,9 +11,9 @@ class CortexMnistDataset(Dataset):
 
     def __init__(self, path: str):
         data = torch.load(path)
-        self.spikes_on  = data["spikes_on"]   # (N, grid, grid, T)
-        self.spikes_off = data["spikes_off"]  # (N, grid, grid, T)
-        self.images     = data["images"]      # (N, 1, H, W)
+        self.spikes_on  = data["spikes_on"]   
+        self.spikes_off = data["spikes_off"]  
+        self.images     = data["images"]      
 
     def __len__(self):
         return len(self.images)
@@ -59,10 +59,10 @@ class CortexMnistEncoder:
         images      = []
 
         for idx in tqdm(range(len(dataset)), desc=desc, unit="sample"):
-            encoder = NeuralEncoder(dx=0.3, dy=0.3, dt=self.dt, ds=0.3)
+            encoder = NeuralEncoder(dx=0.7, dy=0.7, dt=self.dt, ds=0.3)
             image, label = dataset[idx]
             encoder.fit(image, blur_sigma=0)
-            encoder.simulate_random_walk(sigma=0.02, T=self.Tmax)
+            encoder.simulate_random_walk(sigma=0.01, T=self.Tmax)
             encoder.compute_activations(
                 grid_range=10.0, grid_resolution=self.grid_resolution, type='GLM'
             )
@@ -85,18 +85,7 @@ class CortexMnistEncoder:
         self._encode_and_save(self.data_test,  "Encoding test",  "test.pt")
 
 
-# --- Usage: encoding ---
 if __name__ == "__main__":
-    encoder = CortexMnistEncoder(Tmax=2, dt=0.1, grid_resolution=70, save_dir="./cortex_mnist")
+    encoder = CortexMnistEncoder(Tmax=10, dt=0.2, grid_resolution=40, save_dir="./cortex_mnist")
     encoder.generate_data(train_rate=0.8, val_rate=0.2, test_rate=1)
     encoder.encode()
-
-# --- Usage: training ---
-# from torch.utils.data import DataLoader
-#
-# train_dataset = CortexMnistDataset("./cortex_mnist/train.pt")
-# val_dataset   = CortexMnistDataset("./cortex_mnist/val.pt")
-# test_dataset  = CortexMnistDataset("./cortex_mnist/test.pt")
-#
-# train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-# val_loader   = DataLoader(val_dataset,   batch_size=32, shuffle=False)
