@@ -211,7 +211,7 @@ if __name__ == "__main__":
     ds = 0.3
     sim = NeuralEncoder(dx=0.7, dy=0.7, dt=0.2, ds=ds)
     sim.fit(optotype, blur_sigma=0)
-    sim.simulate_random_walk(sigma=0.01, T=10.0)
+    sim.simulate_random_walk(sigma=0.01, T=20.0)
     sim.compute_activations(grid_range=10.0, grid_resolution=40, type='GLM')
 
     anim = sim.animate(interval=100)
