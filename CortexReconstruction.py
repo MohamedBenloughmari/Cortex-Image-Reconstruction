@@ -10,6 +10,7 @@ class NeuralEncoder:
         self.dy = dy
         self.dt = dt
         self.ds = ds
+        self.sigma=None
         self.half_n = None
         self.optotype_np = None
         self.n_steps = None
@@ -18,6 +19,8 @@ class NeuralEncoder:
         self.ganglion_x = None
         self.ganglion_y = None
         self.spikes_on = None 
+        self.lam_on_list=[]
+        self.lam_off_list=[]
         self.spikes_off = None
     def fit(self, optotype: torch.Tensor, blur_sigma: float = 1.5) -> None:
         if optotype.dim() == 3:
@@ -26,10 +29,20 @@ class NeuralEncoder:
         self.half_n = h // 2
         raw = optotype.numpy()
         self.optotype_np = gaussian_filter(raw, sigma=blur_sigma) if blur_sigma > 0 else raw
-    def simulate_random_walk(self, sigma: float, T: float) -> None:
+    def simulate_random_walk(self, D: float, T: float) -> None:
+        """
+        D  : diffusion constant D_C (in physical units, e.g. deg²/s)
+        T  : total duration (in seconds)
+        """
+        self.D = D
         self.n_steps = int(T / self.dt)
+
+        # Per-step std in physical units: sqrt(D * dt)
+        # Converted to pixels: divide by self.dx
+        sigma_step_px = np.sqrt(D * self.dt)
+
         positions = np.zeros((self.n_steps + 1, 2))
-        displacements = np.random.normal(0.0, sigma / self.dx, size=(self.n_steps, 2))
+        displacements = np.random.normal(0.0, sigma_step_px, size=(self.n_steps, 2))
         positions[1:] = np.cumsum(displacements, axis=0)
         self.walk = positions
     def compute_activations(self, grid_range=20.0, grid_resolution=40,
@@ -87,6 +100,8 @@ class NeuralEncoder:
                 c_off = 1.0 - c
                 lam_on  = np.exp(np.log(lambda0) + np.log(lambda1 / lambda0) * c_on)
                 lam_off = np.exp(np.log(lambda0) + np.log(lambda1 / lambda0) * c_off)
+                self.lam_on_list.append(lam_on)
+                self.lam_off_list.append(lam_off)
                 spikes_on[t]  = np.random.poisson(lam_on  * self.dt)
                 spikes_off[t] = np.random.poisson(lam_off * self.dt)
             self.spikes_on  = spikes_on
@@ -193,6 +208,11 @@ class NeuralEncoder:
         return anim
     
 
+
+
+
+
+
 if __name__ == "__main__":
     size = 28
     optotype = torch.zeros(size, size)
@@ -202,9 +222,8 @@ if __name__ == "__main__":
     ds = 0.3
     sim = NeuralEncoder(dx=0.3, dy=0.3, dt=0.01, ds=ds)
     sim.fit(optotype, blur_sigma=0)
-    sim.simulate_random_walk(sigma=0.1, T=2.0)
+    sim.simulate_random_walk(D=1, T=2.0)
     sim.compute_activations(grid_range=10.0, grid_resolution=70, type='GLM')
     np.set_printoptions(threshold=np.inf)
-
-    anim = sim.animate(interval=100)
+    print(sim.spikes_on)
     plt.show()

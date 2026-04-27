@@ -59,10 +59,10 @@ class CortexMnistEncoder:
         images      = []
 
         for idx in tqdm(range(len(dataset)), desc=desc, unit="sample"):
-            encoder = NeuralEncoder(dx=0.7, dy=0.7, dt=self.dt, ds=0.3)
+            encoder = NeuralEncoder(dx=0.3, dy=0.3, dt=self.dt, ds=0.3)
             image, label = dataset[idx]
             encoder.fit(image, blur_sigma=0)
-            encoder.simulate_random_walk(sigma=0.01, T=self.Tmax)
+            encoder.simulate_random_walk(sigma=0.2, T=self.Tmax)
             encoder.compute_activations(
                 grid_range=10.0, grid_resolution=self.grid_resolution, type='GLM'
             )
@@ -86,6 +86,6 @@ class CortexMnistEncoder:
 
 
 if __name__ == "__main__":
-    encoder = CortexMnistEncoder(Tmax=20, dt=0.2, grid_resolution=40, save_dir="./cortex_mnist2")
-    encoder.generate_data(train_rate=0.08, val_rate=0.02, test_rate=0.1)
+    encoder = CortexMnistEncoder(Tmax=1, dt=0.1, grid_resolution=40, save_dir="./cortex_mnist1_01_02")
+    encoder.generate_data(train_rate=0.8, val_rate=0.2, test_rate=0.1)
     encoder.encode()
