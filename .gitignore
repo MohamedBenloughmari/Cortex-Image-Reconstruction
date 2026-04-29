@@ -3,6 +3,7 @@ __pycache__/
 # Cortex MNIST data
 cortex_mnist/
 data/
+MNIST/
 Workshop/
 # MNIST raw data
 data/

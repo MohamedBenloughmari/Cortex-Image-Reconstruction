@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+import torch.nn as nn
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from scipy.ndimage import gaussian_filter
@@ -7,7 +8,8 @@ from sklearn.decomposition import MiniBatchDictionaryLearning
 from sklearn.datasets import fetch_openml
 
 
-# ---------------- DICTIONARY LEARNING ---------------- #
+
+
 def learn_mnist_dictionary(n_components=64, n_samples=5000,
                            alpha=1.0, max_iter=500, random_state=0):
     mnist = fetch_openml('mnist_784', version=1, as_frame=False)
@@ -19,20 +21,19 @@ def learn_mnist_dictionary(n_components=64, n_samples=5000,
         batch_size=64, random_state=random_state, transform_algorithm='lasso_cd'
     )
     dico.fit(X)
-    D = dico.components_.T  # (784, n_components)
+    D = dico.components_.T
     D /= (np.linalg.norm(D, axis=0, keepdims=True) + 1e-12)
     return D, mean_offset
-
-
-# ---------------- ENCODER + DECODER ---------------- #
 class NeuralEncoder:
-    def __init__(self, dx, dy, dt, D_diff, ds=None):
+    def __init__(self, dx, dy, dt, D_diff, ds=None, device=None):
         self.dx, self.dy, self.dt = dx, dy, dt
         self.D_diff = D_diff
         self.ds = ds
+        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
         self.half_n = None
-        self.optotype_np = None        # encoder frame: fliplr(img.T)
-        self.optotype_display = None   # display frame
+        self.optotype_np = None
+        self.optotype_display = None
         self.n_steps = None
         self.walk = None
         self.ganglion_x = None
@@ -40,33 +41,20 @@ class NeuralEncoder:
         self.spikes_on = None
         self.spikes_off = None
 
-        # decoder state / history
         self.A_hat_history = None
-        self.S_hat_history = None      # stored in MNIST orientation for display
+        self.S_hat_history = None
         self.q_particles = None
         self.q_weights = None
         self._mean_offset = 0.0
 
-        # GLM constants
         self.lambda0 = 10.0
         self.lambda1 = 100.0
-
-    # ---------- coordinate-frame helpers ---------- #
     @staticmethod
-    def _mnist_to_encoder(img):
-        """(28,28) MNIST -> encoder frame used by GLM."""
+    def _mnist_to_encoder_np(img):
         return np.fliplr(img.T)
-
     @staticmethod
-    def _encoder_to_mnist(img):
-        """inverse of _mnist_to_encoder."""
-        return np.fliplr(img).T
-
-    def _A_to_S_encoder(self, D, A):
-        img = (D @ A).reshape(28, 28) + self._mean_offset
-        return self._mnist_to_encoder(img)
-
-    # ---------- ENCODER ---------- #
+    def _mnist_to_encoder_torch(img):
+        return torch.flip(img.T, dims=[-1])
     def fit(self, optotype, blur_sigma=1.5):
         if optotype.dim() == 3:
             optotype = optotype.squeeze(0)
@@ -74,17 +62,14 @@ class NeuralEncoder:
         self.half_n = h // 2
         raw = optotype.numpy()
         blurred = gaussian_filter(raw, sigma=blur_sigma) if blur_sigma > 0 else raw
-        self.optotype_display = blurred                       # MNIST frame (28,28)
-        self.optotype_np = self._mnist_to_encoder(blurred)    # encoder frame
-
+        self.optotype_display = blurred
+        self.optotype_np = self._mnist_to_encoder_np(blurred)
     def simulate_random_walk(self, T):
         self.n_steps = int(T / self.dt)
         sigma = np.sqrt(self.D_diff * self.dt)
         disp = np.random.normal(0.0, sigma, size=(self.n_steps, 2))
         self.walk = np.vstack([np.zeros((1, 2)), np.cumsum(disp, axis=0)])
-
-    def _glm_rates(self, S, cx, cy):
-        """S in encoder frame -> (lam_on, lam_off) on ganglion grid."""
+    def _glm_rates_np(self, S, cx, cy):
         H, W = S.shape
         sigma_s = 0.5 * self.ds
         sigma_e = 0.203 * self.ds
@@ -101,8 +86,7 @@ class NeuralEncoder:
         c = np.clip(c_raw / g_norm, 0.0, 1.0)
         lam_on = self.lambda0 * np.exp(np.log(self.lambda1 / self.lambda0) * c)
         lam_off = self.lambda0 * np.exp(np.log(self.lambda1 / self.lambda0) * (1.0 - c))
-        return lam_on, lam_off, gx_w, gy_w, g_norm, sigma2
-
+        return lam_on, lam_off
     def compute_activations(self, grid_range=10.0, grid_resolution=40):
         self.grid_range = grid_range
         self.grid_resolution = grid_resolution
@@ -114,90 +98,92 @@ class NeuralEncoder:
         self.spikes_off = np.zeros((n_t, n_g, n_g), dtype=int)
         for t in range(n_t):
             cx, cy = self.walk[t]
-            lam_on, lam_off, *_ = self._glm_rates(self.optotype_np, cx, cy)
+            lam_on, lam_off = self._glm_rates_np(self.optotype_np, cx, cy)
             self.spikes_on[t] = np.random.poisson(lam_on * self.dt)
             self.spikes_off[t] = np.random.poisson(lam_off * self.dt)
-
-    # ---------- DECODER ---------- #
-    def _log_likelihood(self, lam_on, lam_off, r_on, r_off):
-        return np.sum(r_on * np.log(lam_on * self.dt + 1e-12) - lam_on * self.dt
-                    + r_off * np.log(lam_off * self.dt + 1e-12) - lam_off * self.dt)
-
-    def _propagate_particles(self, particles, A_hat, D, t):
+    def _precompute_torch_constants(self):
+        dev = self.device
+        self.t_xg = torch.tensor(self.ganglion_x, dtype=torch.float32, device=dev)
+        self.t_yg = torch.tensor(self.ganglion_y, dtype=torch.float32, device=dev)
+        H = W = 2 * self.half_n
+        px_x = (torch.arange(H, device=dev, dtype=torch.float32) + 0.5 - self.half_n) * self.dx
+        px_y = (torch.arange(W, device=dev, dtype=torch.float32) + 0.5 - self.half_n) * self.dy
+        self.t_px_x = px_x
+        self.t_px_y = px_y
+        sigma_s = 0.5 * self.ds
+        sigma_e = 0.203 * self.ds
+        self.t_sigma2 = torch.tensor(sigma_s**2 + sigma_e**2,
+                                     dtype=torch.float32, device=dev)
+        self.t_log_ratio = torch.tensor(np.log(self.lambda1 / self.lambda0),
+                                        dtype=torch.float32, device=dev)
+    def _glm_rates_torch(self, S, cx, cy):
+        sigma2 = self.t_sigma2
+        diff_x = (cx + self.t_px_x.unsqueeze(0)) - self.t_xg.unsqueeze(1)  
+        diff_y = (cy + self.t_px_y.unsqueeze(0)) - self.t_yg.unsqueeze(1) 
+        gx_w = torch.exp(-0.5 * diff_x**2 / sigma2)
+        gy_w = torch.exp(-0.5 * diff_y**2 / sigma2)
+        c_raw = (gx_w @ S @ gy_w.T) / (2.0 * np.pi * sigma2)
+        g_norm = c_raw.detach().abs().max().clamp(min=1e-9)
+        c = (c_raw / g_norm).clamp(0.0, 1.0)
+        lam_on = self.lambda0 * torch.exp(self.t_log_ratio * c)
+        lam_off = self.lambda0 * torch.exp(self.t_log_ratio * (1.0 - c))
+        return lam_on, lam_off
+    def _A_to_S_encoder_torch(self, D_t, A):
+        img = (D_t @ A).reshape(28, 28) + self._mean_offset
+        return self._mnist_to_encoder_torch(img)
+    def _propagate_particles(self, particles, A_hat_np, D, t):
         n_p = particles.shape[0]
         sigma = np.sqrt(self.D_diff * self.dt)
         new_p = particles + np.random.normal(0.0, sigma, size=(n_p, 2))
-        S = self._A_to_S_encoder(D, A_hat)
+        S = np.fliplr(((D @ A_hat_np).reshape(28, 28) + self._mean_offset).T)
         r_on, r_off = self.spikes_on[t], self.spikes_off[t]
         log_w = np.zeros(n_p)
         for i in range(n_p):
-            lam_on, lam_off, *_ = self._glm_rates(S, new_p[i, 0], new_p[i, 1])
-            log_w[i] = self._log_likelihood(lam_on, lam_off, r_on, r_off)
+            lam_on, lam_off = self._glm_rates_np(S, new_p[i, 0], new_p[i, 1])
+            log_w[i] = np.sum(r_on * np.log(lam_on * self.dt + 1e-12) - lam_on * self.dt
+                            + r_off * np.log(lam_off * self.dt + 1e-12) - lam_off * self.dt)
         log_w -= log_w.max()
         w = np.exp(log_w); w /= w.sum()
         return new_p, w
-
     def _resample(self, particles, weights):
         n_p = len(weights)
         idx = np.searchsorted(np.cumsum(weights), np.random.uniform(0, 1, n_p))
         idx = np.clip(idx, 0, n_p - 1)
         return particles[idx], np.ones(n_p) / n_p
-
     def _sample_positions(self, particles, weights, n_samples):
         idx = np.searchsorted(np.cumsum(weights), np.random.uniform(0, 1, n_samples))
         idx = np.clip(idx, 0, len(weights) - 1)
         return particles[idx]
-
-    def _grad_Er(self, A, D, samples_t, t):
-        """Gradient of E_r w.r.t. A averaged over sampled positions."""
-        S = self._A_to_S_encoder(D, A)
-        r_on, r_off = self.spikes_on[t], self.spikes_off[t]
-        log_ratio = np.log(self.lambda1 / self.lambda0)
-        grad_S_enc = np.zeros_like(S)
-        for cx, cy in samples_t:
-            lam_on, lam_off, gx_w, gy_w, g_norm, sigma2 = self._glm_rates(S, cx, cy)
-            dL_dc = (-(r_on - lam_on * self.dt) + (r_off - lam_off * self.dt)) * log_ratio
-            grad_S_enc += (gx_w.T @ dL_dc @ gy_w) / (2.0 * np.pi * sigma2 * g_norm)
-        grad_S_enc /= len(samples_t)
-        # encoder frame -> MNIST frame -> sparse code
-        grad_img = self._encoder_to_mnist(grad_S_enc)
-        return D.T @ grad_img.ravel()
-
-    @staticmethod
-    def _soft_threshold(x, thresh):
-        return np.sign(x) * np.maximum(np.abs(x) - thresh, 0.0)
-
-    def _fista_update(self, A_hat, H_hat, D, samples_t, t,
-                      beta=0.05, gamma=0.1, n_iter=15, lr=0.01):
-        A = A_hat.copy()
-        Y = A.copy()
-        t_k = 1.0
+    def _adam_update_A(self, A_param, optimizer, D_t, samples_t, r_on_t, r_off_t,
+                      A_anchor, anchor_weight, beta, gamma, n_iter):
         for _ in range(n_iter):
-            S_enc = self._A_to_S_encoder(D, Y)
-            g_Eg = H_hat @ (Y - A_hat)
-            g_Er = self._grad_Er(Y, D, samples_t, t)
-            pen_enc = gamma * ((S_enc > 1).astype(float) - (S_enc < 0).astype(float))
-            pen_img = self._encoder_to_mnist(pen_enc)
-            g_pix = D.T @ pen_img.ravel()
-            grad = g_Eg + g_Er + g_pix
-            A_new = self._soft_threshold(Y - lr * grad, lr * beta)
-            t_k_new = 0.5 * (1 + np.sqrt(1 + 4 * t_k**2))
-            Y = A_new + ((t_k - 1) / t_k_new) * (A_new - A)
-            A, t_k = A_new, t_k_new
-        return A
-
-    def _update_hessian(self, H_hat, D, tau=0.05, eps=1e-3):
-        log_ratio = np.log(self.lambda1 / self.lambda0)
-        scale = self.dt * 0.5 * (self.lambda0 + self.lambda1) * log_ratio**2
-        JTJ = scale * (D.T @ D)
-        return np.exp(-self.dt / tau) * H_hat + JTJ + eps * np.eye(D.shape[1])
-
+            optimizer.zero_grad()
+            S = self._A_to_S_encoder_torch(D_t, A_param)     
+            nll = 0.0
+            for cx, cy in samples_t:
+                lam_on, lam_off = self._glm_rates_torch(S, float(cx), float(cy))
+                nll = nll + (lam_on * self.dt - r_on_t * torch.log(lam_on * self.dt + 1e-12)).sum()
+                nll = nll + (lam_off * self.dt - r_off_t * torch.log(lam_off * self.dt + 1e-12)).sum()
+            nll = nll / len(samples_t)
+            anchor = 0.5 * anchor_weight * ((A_param - A_anchor) ** 2).sum()
+            l1 = beta * A_param.abs().sum()
+            range_pen = gamma * (torch.clamp(S - 1.0, min=0.0) ** 2
+                                + torch.clamp(-S, min=0.0) ** 2).sum()
+            loss = nll + anchor + l1 + range_pen
+            loss.backward()
+            optimizer.step()
+        return loss.item()
     def decode(self, D, mean_offset=0.0, n_particles=80, n_samples=30,
-               beta=0.05, gamma=0.1, fista_iter=10, lr=0.01, verbose=True):
+               beta=0.05, gamma=0.1, adam_iter=20, lr=1e-2,
+               anchor_weight=1.0, verbose=True):
         self._mean_offset = mean_offset
+        self._precompute_torch_constants()
+        dev = self.device
+        D_t = torch.tensor(D, dtype=torch.float32, device=dev)
         N_sp = D.shape[1]
-        A_hat = np.zeros(N_sp)
-        H_hat = np.eye(N_sp) * 1e-3
+
+        A_param = nn.Parameter(torch.zeros(N_sp, device=dev, dtype=torch.float32))
+        optimizer = torch.optim.Adam([A_param], lr=lr)
 
         T = self.n_steps + 1
         particles = np.zeros((n_particles, 2))
@@ -206,28 +192,33 @@ class NeuralEncoder:
         self.q_particles = np.zeros((T, n_particles, 2))
         self.q_weights = np.zeros((T, n_particles))
         self.A_hat_history = np.zeros((T, N_sp))
-        self.S_hat_history = np.zeros((T, 28, 28))   # MNIST orientation
+        self.S_hat_history = np.zeros((T, 28, 28))
 
         for t in range(T):
+            cur_anchor_w = 0.0 if t == 0 else anchor_weight
             if t > 0:
-                particles, weights = self._propagate_particles(particles, A_hat, D, t)
+                A_np = A_param.detach().cpu().numpy()
+                particles, weights = self._propagate_particles(particles, A_np, D, t)
                 particles, weights = self._resample(particles, weights)
             self.q_particles[t] = particles
             self.q_weights[t] = weights
 
             samples_t = self._sample_positions(particles, weights, n_samples)
-            A_hat = self._fista_update(A_hat, H_hat, D, samples_t, t,
-                                       beta=beta, gamma=gamma,
-                                       n_iter=fista_iter, lr=lr)
-            H_hat = self._update_hessian(H_hat, D)
+            r_on_t = torch.tensor(self.spikes_on[t], dtype=torch.float32, device=dev)
+            r_off_t = torch.tensor(self.spikes_off[t], dtype=torch.float32, device=dev)
+            A_anchor = A_param.detach().clone()
 
-            self.A_hat_history[t] = A_hat
-            self.S_hat_history[t] = (D @ A_hat).reshape(28, 28) + self._mean_offset
+            loss_val = self._adam_update_A(
+                A_param, optimizer, D_t, samples_t, r_on_t, r_off_t,
+                A_anchor=A_anchor, anchor_weight=cur_anchor_w,
+                beta=beta, gamma=gamma, n_iter=adam_iter,
+            )
+            A_np = A_param.detach().cpu().numpy()
+            self.A_hat_history[t] = A_np
+            self.S_hat_history[t] = (D @ A_np).reshape(28, 28) + self._mean_offset
             if verbose and t % max(T // 10, 1) == 0:
-                print(f"[decode] t={t}/{T-1}  ||A||_1={np.abs(A_hat).sum():.2f}")
+                print(f"[decode] t={t}/{T-1}  loss={loss_val:.3f}  ||A||_1={np.abs(A_np).sum():.2f}")
         return self.A_hat_history, self.S_hat_history
-
-    # ---------- ANIMATION ---------- #
     def animate(self, interval=80, save_path=None):
         xg, yg = self.ganglion_x, self.ganglion_y
         half_x = self.half_n * self.dx
@@ -244,7 +235,6 @@ class NeuralEncoder:
         for ax in axes:
             ax.set_aspect('equal')
 
-        # --- stimulus + eye path ---
         cx0, cy0 = self.walk[0]
         opt_img = ax_opt.imshow(
             self.optotype_display,
@@ -257,7 +247,6 @@ class NeuralEncoder:
         ax_opt.set_title('Stimulus + eye path')
         time_text = ax_opt.text(0.02, 0.96, '', transform=ax_opt.transAxes, va='top')
 
-        # --- ON / OFF spikes ---
         on_sc = ax_on.scatter(pts_x, pts_y, c=np.zeros(n_cells),
                               cmap='YlOrRd', vmin=0, vmax=1, s=18)
         ax_on.set_xlim(xg[0], xg[-1]); ax_on.set_ylim(yg[0], yg[-1])
@@ -268,7 +257,6 @@ class NeuralEncoder:
         ax_off.set_xlim(xg[0], xg[-1]); ax_off.set_ylim(yg[0], yg[-1])
         ax_off.set_title('OFF spikes')
 
-        # --- reconstruction ---
         if has_decoder:
             S0 = self.S_hat_history[0]
             vmax0 = max(abs(S0).max(), 1e-3)
@@ -296,7 +284,6 @@ class NeuralEncoder:
                 if vmax - vmin < 1e-6:
                     vmax = vmin + 1e-3
                 rec_img.set_clim(vmin, vmax)
-
             return opt_img, walk_line, fovea, on_sc, off_sc
 
         anim = animation.FuncAnimation(fig, _update,
@@ -308,28 +295,23 @@ class NeuralEncoder:
             anim.save(save_path, writer=writer, fps=1000 // interval, dpi=120)
         return anim
 
-
-# ---------------- MAIN ---------------- #
 if __name__ == "__main__":
     from torchvision import datasets, transforms
-
-    print("Learning MNIST dictionary...")
-    D, mean_offset = learn_mnist_dictionary(n_components=256, n_samples=60000,
+    print("Learning MNIST dictionary")
+    D, mean_offset = learn_mnist_dictionary(n_components=512, n_samples=60000,
                                             alpha=1.0, max_iter=300)
     print(f"D shape = {D.shape}, mean_offset = {mean_offset:.3f}")
-
     ds_val = datasets.MNIST(root='./data', train=False, download=True,
                             transform=transforms.ToTensor())
-    optotype = ds_val[17][0].squeeze(0)
-
-    sim = NeuralEncoder(dx=0.5, dy=0.5, dt=0.01, ds=0.3, D_diff=5.0)
+    optotype = ds_val[0][0].squeeze(0)
+    sim = NeuralEncoder(dx=0.4, dy=0.4, dt=0.01, ds=0.3, D_diff=7.0)
     sim.fit(optotype, blur_sigma=0.0)
     sim.simulate_random_walk(T=1)
-    sim.compute_activations(grid_range=10.0, grid_resolution=50)
-
+    sim.compute_activations(grid_range=10.0, grid_resolution=20)
     sim.decode(D, mean_offset=mean_offset,
-               n_particles=80, n_samples=30,
-               beta=1, gamma=0.1, fista_iter=50, lr=1e-6)
-
+           n_particles=200, n_samples=100,
+           beta=0.01, gamma=1.0,
+           adam_iter=50, lr=1e-4,
+           anchor_weight=0.5)
     anim = sim.animate(interval=100)
     plt.show()

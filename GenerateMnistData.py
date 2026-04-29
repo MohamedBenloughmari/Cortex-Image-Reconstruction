@@ -3,7 +3,7 @@ import torch
 from torch.utils.data import Dataset, Subset
 from torchvision import datasets, transforms
 from tqdm import tqdm
-from CortexReconstructionMnist import NeuralEncoder
+from CortexReconstructionMnist2 import NeuralEncoder
 
 
 class CortexMnistDataset(Dataset):
