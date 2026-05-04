@@ -154,25 +154,52 @@ class NeuralEncoder:
         idx = np.searchsorted(np.cumsum(weights), np.random.uniform(0, 1, n_samples))
         idx = np.clip(idx, 0, len(weights) - 1)
         return particles[idx]
-    def _adam_update_A(self, A_param, optimizer, D_t, samples_t, r_on_t, r_off_t,
-                      A_anchor, anchor_weight, beta, gamma, n_iter):
+    def Er_fn(self,S,samples_t,r_on_t,r_off_t):
+        nll = 0.0
+        for cx, cy in samples_t:
+            lam_on, lam_off = self._glm_rates_torch(S, float(cx), float(cy))
+            nll = nll + (lam_on * self.dt - r_on_t * torch.log(lam_on * self.dt + 1e-12)).sum()
+            nll = nll + (lam_off * self.dt - r_off_t * torch.log(lam_off * self.dt + 1e-12)).sum()
+        Er = nll / len(samples_t)
+        return Er
+    def Ep_fn(self,A_param, A_anchor, beta):
+        grad_log_p = -beta * torch.sign(A_anchor)   
+        diff = A_param - A_anchor                                
+        linearized = -beta * torch.sum(torch.abs(A_anchor))  
+        correction = (diff * grad_log_p).sum()            
+        neg_Ep = linearized - correction
+        return neg_Ep
+
+    def _adam_update_A(self, A_param, Hessian ,optimizer, D_t, samples_t, r_on_t, r_off_t,
+                      A_anchor, beta, gamma, n_iter):
         for _ in range(n_iter):
             optimizer.zero_grad()
             S = self._A_to_S_encoder_torch(D_t, A_param)     
-            nll = 0.0
-            for cx, cy in samples_t:
-                lam_on, lam_off = self._glm_rates_torch(S, float(cx), float(cy))
-                nll = nll + (lam_on * self.dt - r_on_t * torch.log(lam_on * self.dt + 1e-12)).sum()
-                nll = nll + (lam_off * self.dt - r_off_t * torch.log(lam_off * self.dt + 1e-12)).sum()
-            nll = nll / len(samples_t)
-            anchor = 0.5 * anchor_weight * ((A_param - A_anchor) ** 2).sum()
-            l1 = beta * A_param.abs().sum()
+            Er=self.Er_fn(S,samples_t,r_on_t,r_off_t)
+            Eg = 0.5*(A_param - A_anchor).T@Hessian@(A_param-A_anchor)
+            Ep=self.Ep_fn(A_param, A_anchor, beta)
             range_pen = gamma * (torch.clamp(S - 1.0, min=0.0) ** 2
                                 + torch.clamp(-S, min=0.0) ** 2).sum()
-            loss = nll + anchor + l1 + range_pen
+            loss = Er + Eg + Ep + range_pen
             loss.backward()
             optimizer.step()
         return loss.item()
+    
+    @staticmethod
+    def compute_hessian(A_anchor, Er_fn:callable):
+        A = A_anchor.detach().requires_grad_(True)
+        Er = Er_fn(A)
+        grad = torch.autograd.grad(Er, A, create_graph=True)[0]
+        n = A.numel()
+        H = torch.zeros(n, n)
+
+        for i in range(n):
+            H[i] = torch.autograd.grad(
+                grad.flatten()[i], A, retain_graph=True
+            )[0].flatten()
+
+        return H
+
     def decode(self, D, mean_offset=0.0, n_particles=80, n_samples=30,
                beta=0.05, gamma=0.1, adam_iter=20, lr=1e-2,
                anchor_weight=1.0, verbose=True):
@@ -183,6 +210,7 @@ class NeuralEncoder:
         N_sp = D.shape[1]
 
         A_param = nn.Parameter(torch.zeros(N_sp, device=dev, dtype=torch.float32))
+        Hessian = torch.zeros((N_sp, N_sp), device=dev, dtype=torch.float32)
         optimizer = torch.optim.Adam([A_param], lr=lr)
 
         T = self.n_steps + 1
@@ -209,10 +237,13 @@ class NeuralEncoder:
             A_anchor = A_param.detach().clone()
 
             loss_val = self._adam_update_A(
-                A_param, optimizer, D_t, samples_t, r_on_t, r_off_t,
+                A_param, Hessian ,optimizer, D_t, samples_t, r_on_t, r_off_t,
                 A_anchor=A_anchor, anchor_weight=cur_anchor_w,
                 beta=beta, gamma=gamma, n_iter=adam_iter,
             )
+            S_fn = lambda A: self._A_to_S_encoder_torch(D_t, A)
+            Er_closure = lambda A: self.Er_fn(S_fn(A), samples_t, r_on_t, r_off_t)
+            Hessian = self.compute_hessian(A_anchor, Er_closure)
             A_np = A_param.detach().cpu().numpy()
             self.A_hat_history[t] = A_np
             self.S_hat_history[t] = (D @ A_np).reshape(28, 28) + self._mean_offset
@@ -298,7 +329,7 @@ class NeuralEncoder:
 if __name__ == "__main__":
     from torchvision import datasets, transforms
     print("Learning MNIST dictionary")
-    D, mean_offset = learn_mnist_dictionary(n_components=512, n_samples=60000,
+    D, mean_offset = learn_mnist_dictionary(n_components=64, n_samples=60000,
                                             alpha=1.0, max_iter=300)
     print(f"D shape = {D.shape}, mean_offset = {mean_offset:.3f}")
     ds_val = datasets.MNIST(root='./data', train=False, download=True,
@@ -306,8 +337,8 @@ if __name__ == "__main__":
     optotype = ds_val[0][0].squeeze(0)
     sim = NeuralEncoder(dx=0.4, dy=0.4, dt=0.01, ds=0.3, D_diff=7.0)
     sim.fit(optotype, blur_sigma=0.0)
-    sim.simulate_random_walk(T=1)
-    sim.compute_activations(grid_range=10.0, grid_resolution=20)
+    sim.simulate_random_walk(T=2)
+    sim.compute_activations(grid_range=10.0, grid_resolution=10)
     sim.decode(D, mean_offset=mean_offset,
            n_particles=200, n_samples=100,
            beta=0.01, gamma=1.0,
