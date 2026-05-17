@@ -388,7 +388,7 @@ if __name__ == "__main__":
     from torchvision import datasets, transforms
 
     print("Learning MNIST dictionary")
-    D, mean_offset = learn_mnist_dictionary(n_components=256, n_samples=60000,
+    D, mean_offset = learn_mnist_dictionary(n_components=512, n_samples=60000,
                                             alpha=1.0, max_iter=300)
     print(f"D shape = {D.shape}, mean_offset = {mean_offset:.3f}")
 
@@ -396,10 +396,10 @@ if __name__ == "__main__":
                             transform=transforms.ToTensor())
     optotype = ds_val[0][0].squeeze(0)
 
-    sim = NeuralEncoder(dx=0.5, dy=0.5, dt=0.0, ds=0.3, D_diff=1.0)
+    sim = NeuralEncoder(dx=0.14, dy=0.14, dt=0.01, ds=0.3, D_diff=10.0)
     sim.fit(optotype, blur_sigma=0.0)
-    sim.simulate_random_walk(T=1)
-    sim.compute_activations(grid_range=10.0, grid_resolution=15)
+    sim.simulate_random_walk(T=0.750)
+    sim.compute_activations(grid_range=10, grid_resolution=30)
     sim.decode(
         D, mean_offset=mean_offset,
         n_particles=100, n_samples=100,
